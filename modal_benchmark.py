@@ -3,6 +3,7 @@ import subprocess
 import modal
 
 app = modal.App("cs336-a2-benchmark")
+profiles = modal.Volume.from_name("cs336-nsys-profiles", create_if_missing=True)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -24,7 +25,17 @@ def ignore_project_file(path: Path) -> bool:
     )
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry("ubuntu:22.04", add_python="3.11")
+    .entrypoint([])
+    .apt_install("ca-certificates", "gnupg")
+    .run_commands(
+        "echo 'deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /' "
+        "> /etc/apt/sources.list.d/nvidia-devtools.list",
+        "apt-key adv --fetch-keys "
+        "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub",
+        "apt-get update",
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsight-systems-cli",
+    )
     .uv_pip_install("uv")
     .add_local_dir(
         ROOT,
@@ -39,24 +50,34 @@ image = (
     )
 )
 
-@app.function(image=image, gpu="T4", timeout=20 * 60)
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=20 * 60,
+    volumes={"/profiles": profiles},
+)
 def smoke_test():
     subprocess.run(
         [
-            "uv", "run", "cs336_systems/benchmark.py",
-            "--context-length", "128",
-            "--d-model", "128",
-            "--num-layers", "2",
-            "--num-heads", "4",
-            "--batch-size", "2",
-            "--d-ff", "512",
-            "--warmup-steps", "2",
-            "--steps", "3",
+            "uv", "run", "nsys", "profile",
+            "--output=/profiles/benchmark",
+            "--force-overwrite=true",
+            "--", "python", "cs336_systems/benchmark.py",
+            "--context-length", "512",
+            "--d-model", "768",
+            "--num-layers", "12",
+            "--num-heads", "12",
+            "--batch-size", "4",
+            "--d-ff", "3072",
+            "--warmup-steps", "5",
+            "--steps", "10",
             "--backward",
+            "--optimizer"
         ],
         cwd="/root/assignment2",
         check=True,
     )
+    profiles.commit()
 
 @app.local_entrypoint()
 def main():
