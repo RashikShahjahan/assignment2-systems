@@ -63,6 +63,7 @@ def smoke_test():
             "--trace=cuda,nvtx",
             "--capture-range=nvtx",
             "--nvtx-capture=profile",
+            "--env-var=NSYS_NVTX_PROFILER_REGISTER_ONLY=0",
             "--output=/profiles/benchmark",
             "--force-overwrite=true",
             "--", "python", "cs336_systems/benchmark.py",
