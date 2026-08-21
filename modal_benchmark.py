@@ -34,7 +34,12 @@ image = (
         "apt-key adv --fetch-keys "
         "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub",
         "apt-get update",
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsight-systems-cli",
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nsight-systems-cli-2026.4.1",
+    )
+    .add_local_file(
+        ROOT / "nsys-config.ini",
+        remote_path="/root/.config/NVIDIA Corporation/nsys-config.ini",
+        copy=True,
     )
     .uv_pip_install("uv")
     .add_local_dir(
@@ -60,12 +65,19 @@ def smoke_test():
     subprocess.run(
         [
             "uv", "run", "nsys", "profile",
-            "--trace=cuda,nvtx",
+            "--trace=cuda-sw,nvtx",
+            "--sample=none",
+            "--cpuctxsw=none",
+            "--cuda-um-cpu-page-faults=false",
+            "--cuda-um-gpu-page-faults=false",
+            "--cuda-flush-interval=100",
             "--capture-range=nvtx",
+            "--capture-range-end=stop",
             "--nvtx-capture=profile",
             "--env-var=NSYS_NVTX_PROFILER_REGISTER_ONLY=0",
             "--output=/profiles/benchmark",
             "--force-overwrite=true",
+            "--stats=true",
             "--", "python", "cs336_systems/benchmark.py",
             "--context-length", "512",
             "--d-model", "768",
