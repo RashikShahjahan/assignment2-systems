@@ -1,5 +1,5 @@
 import statistics
-
+import torch.cuda.nvtx as nvtx
 import argparse
 import torch
 import timeit
@@ -59,28 +59,41 @@ def main():
 
     measurements = []
 
-    for t in range(args.warmup_steps+args.steps):
+    for t in range(args.warmup_steps):
+        optimizer.zero_grad()
+        logits = model(input_ids)
+        loss = cross_entropy(logits, targets)
+        loss.backward()
+        optimizer.step()
+
+    torch.cuda.synchronize()
+
+
+    for t in range(args.steps):
         torch.cuda.synchronize()
         start_time = timeit.default_timer()
         if args.backward:
             optimizer.zero_grad()
-        logits = model(input_ids)
-        if args.backward:
-            loss = cross_entropy(logits, targets)
-            loss.backward()
-            if args.optimizer:
-                optimizer.step()
-        torch.cuda.synchronize()
+        with nvtx.range("profile"):
+            with nvtx.range("forward"):
+                logits = model(input_ids)
+            if args.backward:
+                with nvtx.range("loss"):
+                    loss = cross_entropy(logits, targets)
+                with nvtx.range("backward"):
+                    loss.backward()
+                if args.optimizer:
+                    with nvtx.range("optimizer"):
+                        optimizer.step()
+            torch.cuda.synchronize()
         elapsed = timeit.default_timer() - start_time
-        if t < args.warmup_steps:
-            print("warmup")
-        else:
-            measurements.append(elapsed)
+
+        measurements.append(elapsed)
 
 
 
     print(f"mean: {statistics.mean(measurements) * 1000:.3f} ms")
-    print(f"std:  {statistics.stdev(measurements) * 1000:.3f} ms")
+    #print(f"std:  {statistics.stdev(measurements) * 1000:.3f} ms")
 
 
 if __name__ == "__main__":

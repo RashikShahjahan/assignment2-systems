@@ -25,7 +25,7 @@ def ignore_project_file(path: Path) -> bool:
     )
 
 image = (
-    modal.Image.from_registry("ubuntu:22.04", add_python="3.11")
+    modal.Image.from_registry("ubuntu:22.04", add_python="3.14")
     .entrypoint([])
     .apt_install("ca-certificates", "gnupg")
     .run_commands(
@@ -60,6 +60,9 @@ def smoke_test():
     subprocess.run(
         [
             "uv", "run", "nsys", "profile",
+            "--trace=cuda,nvtx",
+            "--capture-range=nvtx",
+            "--nvtx-capture=profile",
             "--output=/profiles/benchmark",
             "--force-overwrite=true",
             "--", "python", "cs336_systems/benchmark.py",
@@ -70,7 +73,7 @@ def smoke_test():
             "--batch-size", "4",
             "--d-ff", "3072",
             "--warmup-steps", "5",
-            "--steps", "10",
+            "--steps", "1",
             "--backward",
             "--optimizer"
         ],
