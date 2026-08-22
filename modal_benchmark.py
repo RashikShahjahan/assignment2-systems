@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import subprocess
 import modal
 
@@ -27,7 +28,7 @@ def ignore_project_file(path: Path) -> bool:
 image = (
     modal.Image.from_registry("ubuntu:22.04", add_python="3.14")
     .entrypoint([])
-    .apt_install("ca-certificates", "gnupg")
+    .apt_install("binutils", "ca-certificates", "gnupg")
     .run_commands(
         "echo 'deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /' "
         "> /etc/apt/sources.list.d/nvidia-devtools.list",
@@ -88,10 +89,15 @@ def smoke_test():
             "--warmup-steps", "5",
             "--steps", "1",
             "--backward",
-            "--optimizer"
+            "--optimizer",
+             "--bf16",
         ],
         cwd="/root/assignment2",
         check=True,
+    )
+    shutil.copy2(
+        "/root/assignment2/memory_snapshot.pickle",
+        "/profiles/memory_snapshot.pickle",
     )
     profiles.commit()
 

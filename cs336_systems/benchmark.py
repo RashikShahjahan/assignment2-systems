@@ -82,6 +82,7 @@ def main():
 
     for t in range(args.steps):
         torch.cuda.synchronize()
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
         start_time = timeit.default_timer()
         if args.backward:
             optimizer.zero_grad()
@@ -99,7 +100,10 @@ def main():
                             optimizer.step()
                 torch.cuda.synchronize()
         elapsed = timeit.default_timer() - start_time
-
+        # Save a pickle file to be loaded by PyTorch's online tool.
+        torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+        # Stop recording history.
+        torch.cuda.memory._record_memory_history(enabled=None)
         measurements.append(elapsed)
 
 
