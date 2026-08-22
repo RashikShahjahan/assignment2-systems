@@ -6,7 +6,7 @@ import timeit
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import AdamW
 from cs336_basics.nn_utils import cross_entropy
-
+from contextlib import nullcontext
 
 def main():
     parser = argparse.ArgumentParser(description='benchmark language models')
@@ -28,6 +28,10 @@ def main():
     "--optimizer",
     action="store_true",
     help="Benchmark optimizer step",)
+    parser.add_argument(
+    "--bf16",
+    action="store_true",
+    help="use bf16",)
 
     args = parser.parse_args()
 
@@ -36,6 +40,13 @@ def main():
 
     device = torch.device("cuda")
     model = BasicsTransformerLM(vocab_size=10000, context_length= args.context_length, d_model=args.d_model,num_layers=args.num_layers, d_ff=args.d_ff, num_heads = args.num_heads).to(device)
+
+
+    if args.bf16:
+        context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    else:
+        context = nullcontext()
+
 
     optimizer = AdamW(model.parameters())
 
@@ -75,17 +86,18 @@ def main():
         if args.backward:
             optimizer.zero_grad()
         with nvtx.range("profile"):
-            with nvtx.range("forward"):
-                logits = model(input_ids)
-            if args.backward:
-                with nvtx.range("loss"):
-                    loss = cross_entropy(logits, targets)
-                with nvtx.range("backward"):
-                    loss.backward()
-                if args.optimizer:
-                    with nvtx.range("optimizer"):
-                        optimizer.step()
-            torch.cuda.synchronize()
+            with context:
+                with nvtx.range("forward"):
+                    logits = model(input_ids)
+                if args.backward:
+                    with nvtx.range("loss"):
+                        loss = cross_entropy(logits, targets)
+                    with nvtx.range("backward"):
+                        loss.backward()
+                    if args.optimizer:
+                        with nvtx.range("optimizer"):
+                            optimizer.step()
+                torch.cuda.synchronize()
         elapsed = timeit.default_timer() - start_time
 
         measurements.append(elapsed)
