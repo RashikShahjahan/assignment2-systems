@@ -36,7 +36,14 @@ class FlashAttention(torch.autograd.Function):
                     K_j.float(),
                     "batch query d, batch key d -> batch query key",
                 ) / math.sqrt(d)
-
+                query_indices = torch.arange(q_start, q_end, device=Q.device)
+                key_indices = torch.arange(k_start, k_end, device=Q.device)
+                causal_mask = key_indices[None, :] <= query_indices[:, None]
+                if is_causal:
+                    scores = scores.masked_fill(
+                        ~causal_mask[None, :, :],
+                        float("-inf"),
+                    )
                 m_tile = torch.max(scores, dim=-1).values
                 m_new = torch.maximum(m_i, m_tile)
                 alpha = torch.exp(m_i - m_new)
@@ -76,6 +83,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    IS_CAUSAL: tl.constexpr
 ):
     # Program indices
     query_tile_index = tl.program_id(0)
@@ -147,10 +155,24 @@ def flash_fwd_kernel(
         padding_option="zero",
         )
 
+
+
         key_indices = k_start + tl.arange(0, K_TILE_SIZE)
-        valid_keys = key_indices < N_KEYS
+        query_indices = (
+            query_tile_index * Q_TILE_SIZE
+            + tl.arange(0, Q_TILE_SIZE)
+        )
+
+        if IS_CAUSAL:
+            valid_scores = (
+                (key_indices[None, :] <= query_indices[:, None])
+                & (key_indices[None, :] < N_KEYS)
+            )
+        else:
+            valid_scores = key_indices[None, :] < N_KEYS
+
         S = tl.dot(q, k) * scale
-        S = tl.where(valid_keys[None, :], S, -float("inf"))
+        S = tl.where(valid_scores, S, -float("inf"))
         m_tile = tl.max(S,axis=1)
         m_new = tl.maximum(m,m_tile)
         p_tilde = tl.exp(S-m_new[:,None])
@@ -181,9 +203,6 @@ def flash_fwd_kernel(
 class FlashAttentionTriton(torch.autograd.Function):
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
-        if is_causal:
-            raise NotImplementedError("Causal attention is not implemented yet")
-
         B, Nq, D = Q.shape
         _, Nk, _ = K.shape
 
@@ -218,6 +237,7 @@ class FlashAttentionTriton(torch.autograd.Function):
             D=D,
             Q_TILE_SIZE=Q_TILE_SIZE,
             K_TILE_SIZE=K_TILE_SIZE,
+            IS_CAUSAL = is_causal
         )
 
         ctx.save_for_backward(L, Q, K, V, O)
