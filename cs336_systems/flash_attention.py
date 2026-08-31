@@ -1,6 +1,8 @@
 import torch
 from einops import einsum
 import math
+import triton
+import triton.language as tl
 
 class FlashAttention(torch.autograd.Function):
     @staticmethod
@@ -59,3 +61,165 @@ class FlashAttention(torch.autograd.Function):
 
         return O
 
+
+@triton.jit
+def flash_fwd_kernel(
+    Q_ptr, K_ptr, V_ptr,
+    O_ptr, L_ptr,
+    stride_qb, stride_qq, stride_qd,
+    stride_kb, stride_kk, stride_kd,
+    stride_vb, stride_vk, stride_vd,
+    stride_ob, stride_oq, stride_od,
+    stride_lb, stride_lq,
+    N_QUERIES, N_KEYS,
+    scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+):
+    # Program indices
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+    # Offset each pointer with the corresponding batch index
+    # multiplied with the batch stride for each tensor
+    Q_block_ptr = tl.make_block_ptr(
+        Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    K_block_ptr = tl.make_block_ptr(
+        K_ptr + batch_index * stride_kb,
+        shape=(D,N_KEYS),
+        strides=(stride_kd, stride_kk),
+        offsets=(0, 0),
+        block_shape=(D, K_TILE_SIZE),
+        order=(0, 1),
+    )
+
+    V_block_ptr = tl.make_block_ptr(
+        V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, D),
+        strides=(stride_vk, stride_vd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0),
+    )
+
+    O_block_ptr = tl.make_block_ptr(
+        O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, D),
+        strides=(stride_oq, stride_od),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    m = tl.full((Q_TILE_SIZE,), -float("inf"), tl.float32)
+    l = tl.zeros((Q_TILE_SIZE,), tl.float32)
+    accum = tl.zeros((Q_TILE_SIZE, D), tl.float32)
+
+    q = tl.load(
+    Q_block_ptr,
+    boundary_check=(0, 1),
+    padding_option="zero",
+    )
+
+    L_block_ptr = tl.make_block_ptr(
+        L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(query_tile_index * Q_TILE_SIZE,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
+    )
+
+    for k_start in tl.range(0, N_KEYS, K_TILE_SIZE):
+        k = tl.load(
+        K_block_ptr,
+        boundary_check=(1,),
+        padding_option="zero",
+        )
+        v  = tl.load(
+        V_block_ptr,
+        boundary_check=(0,),
+        padding_option="zero",
+        )
+
+        key_indices = k_start + tl.arange(0, K_TILE_SIZE)
+        valid_keys = key_indices < N_KEYS
+        S = tl.dot(q, k) * scale
+        S = tl.where(valid_keys[None, :], S, -float("inf"))
+        m_tile = tl.max(S,axis=1)
+        m_new = tl.maximum(m,m_tile)
+        p_tilde = tl.exp(S-m_new[:,None])
+        alpha = tl.exp(m-m_new)
+        l_new = alpha*l + tl.sum(p_tilde, axis = 1)
+        accum_new = alpha[:,None]*accum+tl.dot(p_tilde,v)
+
+        m = m_new
+        l = l_new
+        accum = accum_new
+        K_block_ptr = tl.advance(
+            K_block_ptr,
+            (0, K_TILE_SIZE),
+        )
+        V_block_ptr = tl.advance(
+            V_block_ptr,
+            (K_TILE_SIZE, 0),
+        )
+
+
+    O_tile = accum/l[:,None]
+    L_tile = m+tl.log(l)
+    tl.store(O_block_ptr, O_tile,boundary_check=(0, 1),
+)
+
+    tl.store(L_block_ptr, L_tile,boundary_check=(0,),)
+
+class FlashAttentionTriton(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, Q, K, V, is_causal=False):
+        if is_causal:
+            raise NotImplementedError("Causal attention is not implemented yet")
+
+        B, Nq, D = Q.shape
+        _, Nk, _ = K.shape
+
+        Q_TILE_SIZE = 16
+        K_TILE_SIZE = 16
+
+        O = torch.empty_like(Q)
+        L = torch.empty(
+            (B, Nq),
+            device=Q.device,
+            dtype=torch.float32,
+        )
+
+        grid = (
+            triton.cdiv(Nq, Q_TILE_SIZE),
+            B,
+        )
+
+        flash_fwd_kernel[grid](
+            Q, K, V,
+            O, L,
+
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            K.stride(0), K.stride(1), K.stride(2),
+            V.stride(0), V.stride(1), V.stride(2),
+            O.stride(0), O.stride(1), O.stride(2),
+            L.stride(0), L.stride(1),
+
+            Nq, Nk,
+            1.0 / math.sqrt(D),
+
+            D=D,
+            Q_TILE_SIZE=Q_TILE_SIZE,
+            K_TILE_SIZE=K_TILE_SIZE,
+        )
+
+        ctx.save_for_backward(L, Q, K, V, O)
+        ctx.is_causal = is_causal
+        return O

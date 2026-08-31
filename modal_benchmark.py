@@ -26,9 +26,9 @@ def ignore_project_file(path: Path) -> bool:
     )
 
 image = (
-    modal.Image.from_registry("ubuntu:22.04", add_python="3.14")
+    modal.Image.from_registry("ubuntu:22.04", add_python="3.13")
     .entrypoint([])
-    .apt_install("binutils", "ca-certificates", "gnupg")
+    .apt_install("binutils", "build-essential", "ca-certificates", "gnupg")
     .run_commands(
         "echo 'deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/ /' "
         "> /etc/apt/sources.list.d/nvidia-devtools.list",
@@ -100,6 +100,27 @@ def smoke_test():
         "/profiles/memory_snapshot.pickle",
     )
     profiles.commit()
+
+
+@app.function(
+    image=image,
+    gpu="T4",
+    timeout=20 * 60,
+)
+def run_flashattention_tests(test_filter: str = "test_flash_forward_pass_triton"):
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-vv",
+            "tests/test_attention.py",
+            "-k",
+            test_filter,
+        ],
+        cwd="/root/assignment2",
+        check=True,
+    )
 
 @app.local_entrypoint()
 def main():
