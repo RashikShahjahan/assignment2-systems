@@ -114,6 +114,7 @@ def run_flashattention_tests(test_filter: str = "test_flash_forward_pass_triton"
             "run",
             "pytest",
             "-vv",
+            "--maxfail=1",
             "tests/test_attention.py",
             "-k",
             test_filter,
@@ -123,5 +124,8 @@ def run_flashattention_tests(test_filter: str = "test_flash_forward_pass_triton"
     )
 
 @app.local_entrypoint()
-def main():
-    smoke_test.remote()
+def main(test_filter: str = ""):
+    if test_filter:
+        run_flashattention_tests.remote(test_filter)
+    else:
+        smoke_test.remote()

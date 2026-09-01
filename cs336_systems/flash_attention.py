@@ -64,9 +64,88 @@ class FlashAttention(torch.autograd.Function):
             O_i = accum/l_i[:,:,None]
             O[:, q_start:q_end, :] = O_i.to(dtype=O.dtype)
             L[:, q_start:q_end] = m_i + torch.log(l_i)
-            ctx.save_for_backward(L,Q,K,V,O)
+        ctx.save_for_backward(L,Q,K,V,O)
+        ctx.is_causal = is_causal
 
         return O
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        L,Q,K,V,O = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        D = torch.sum(
+        grad_out.float() * O.float(),
+        dim=-1,
+        )
+        dQ = torch.zeros_like(Q, dtype=torch.float32)
+        dK = torch.zeros_like(K, dtype=torch.float32)
+        dV = torch.zeros_like(V, dtype=torch.float32)
+        _, Nk, _ = K.shape
+        B, Nq, d = Q.shape
+
+        Q_TILE_SIZE = 16
+        K_TILE_SIZE= 16
+        Tq = (Nq + Q_TILE_SIZE - 1) // Q_TILE_SIZE
+        Tk = (Nk + K_TILE_SIZE - 1) // K_TILE_SIZE
+        for i in range(Tq):        
+            q_start = i*Q_TILE_SIZE
+            q_end = min(q_start+Q_TILE_SIZE, Nq)
+            L_i = L[:, q_start:q_end]
+            dO_i = grad_out[:, q_start:q_end, :]
+
+            D_i = D[:, q_start:q_end]
+            Q_i = Q[:, q_start:q_end, :]
+            dQ_i = torch.zeros_like(Q_i)
+            for j in range(Tk):
+                k_start = j*K_TILE_SIZE
+                k_end = min(k_start+K_TILE_SIZE,Nk)
+                K_j = K[:, k_start:k_end, :]
+                V_j = V[:, k_start:k_end, :]
+                scores = einsum(
+                    Q_i,
+                    K_j,
+                    "batch query d, batch key d -> batch query key",
+                ) / math.sqrt(d)
+                query_indices = torch.arange(q_start, q_end, device=Q.device)
+                key_indices = torch.arange(k_start, k_end, device=Q.device)
+                causal_mask = key_indices[None, :] <= query_indices[:, None]
+                if is_causal:
+                    scores = scores.masked_fill(
+                        ~causal_mask[None, :, :],
+                        float("-inf"),
+                    )
+                probs = torch.exp(scores-L_i[:,:,None])
+                grad_probs = einsum(
+                    dO_i,
+                    V_j,
+                    "batch query d, batch key d -> batch query key",
+                )
+
+                grad_scores = probs*(grad_probs-D_i[:,:,None])
+
+                dQ_contribution = einsum(
+                grad_scores,
+                K_j,
+                "batch query key, batch key d -> batch query d",
+            ) / math.sqrt(d)
+
+
+                dK_contribution = einsum(
+                grad_scores,
+                Q_i,
+                "batch query key, batch query d -> batch key d",
+            ) / math.sqrt(d)
+                
+                dV_contribution = einsum(
+                probs,
+                dO_i,
+                "batch query key, batch query d -> batch key d",
+            )
+                dQ_i+=dQ_contribution
+                dK[:, k_start:k_end, :]+=dK_contribution
+                dV[:, k_start:k_end, :]+=dV_contribution
+            dQ[:, q_start:q_end, :] = dQ_i
+        return dQ, dK, dV,None
 
 
 @triton.jit
@@ -243,3 +322,81 @@ class FlashAttentionTriton(torch.autograd.Function):
         ctx.save_for_backward(L, Q, K, V, O)
         ctx.is_causal = is_causal
         return O
+    @staticmethod
+    def backward(ctx, grad_out):
+        L,Q,K,V,O = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        D = torch.sum(
+        grad_out.float() * O.float(),
+        dim=-1,
+        )
+        dQ = torch.zeros_like(Q, dtype=torch.float32)
+        dK = torch.zeros_like(K, dtype=torch.float32)
+        dV = torch.zeros_like(V, dtype=torch.float32)
+        _, Nk, _ = K.shape
+        B, Nq, d = Q.shape
+
+        Q_TILE_SIZE = 16
+        K_TILE_SIZE= 16
+        Tq = (Nq + Q_TILE_SIZE - 1) // Q_TILE_SIZE
+        Tk = (Nk + K_TILE_SIZE - 1) // K_TILE_SIZE
+        for i in range(Tq):        
+            q_start = i*Q_TILE_SIZE
+            q_end = min(q_start+Q_TILE_SIZE, Nq)
+            L_i = L[:, q_start:q_end]
+            dO_i = grad_out[:, q_start:q_end, :]
+
+            D_i = D[:, q_start:q_end]
+            Q_i = Q[:, q_start:q_end, :]
+            dQ_i = torch.zeros_like(Q_i)
+            for j in range(Tk):
+                k_start = j*K_TILE_SIZE
+                k_end = min(k_start+K_TILE_SIZE,Nk)
+                K_j = K[:, k_start:k_end, :]
+                V_j = V[:, k_start:k_end, :]
+                scores = einsum(
+                    Q_i,
+                    K_j,
+                    "batch query d, batch key d -> batch query key",
+                ) / math.sqrt(d)
+                query_indices = torch.arange(q_start, q_end, device=Q.device)
+                key_indices = torch.arange(k_start, k_end, device=Q.device)
+                causal_mask = key_indices[None, :] <= query_indices[:, None]
+                if is_causal:
+                    scores = scores.masked_fill(
+                        ~causal_mask[None, :, :],
+                        float("-inf"),
+                    )
+                probs = torch.exp(scores-L_i[:,:,None])
+                grad_probs = einsum(
+                    dO_i,
+                    V_j,
+                    "batch query d, batch key d -> batch query key",
+                )
+
+                grad_scores = probs*(grad_probs-D_i[:,:,None])
+
+                dQ_contribution = einsum(
+                grad_scores,
+                K_j,
+                "batch query key, batch key d -> batch query d",
+            ) / math.sqrt(d)
+
+
+                dK_contribution = einsum(
+                grad_scores,
+                Q_i,
+                "batch query key, batch query d -> batch key d",
+            ) / math.sqrt(d)
+                
+                dV_contribution = einsum(
+                probs,
+                dO_i,
+                "batch query key, batch query d -> batch key d",
+            )
+                dQ_i+=dQ_contribution
+                dK[:, k_start:k_end, :]+=dK_contribution
+                dV[:, k_start:k_end, :]+=dV_contribution
+            dQ[:, q_start:q_end, :] = dQ_i
+        return dQ, dK, dV,None
+
