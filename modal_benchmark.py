@@ -126,6 +126,21 @@ def run_flashattention_tests(test_filter: str = "test_flash_forward_pass_triton"
 
 @app.function(
     image=image,
+    gpu="A100-80GB:2",
+    cpu=8,
+    memory=65536,
+    timeout=20 * 60,
+)
+def run_ddp_benchmark():
+    subprocess.run(
+        ["uv", "run", "python", "-m", "cs336_systems.benchmark_ddp"],
+        cwd="/root/assignment2",
+        check=True,
+    )
+
+
+@app.function(
+    image=image,
     gpu="T4:8",
     timeout=20 * 60,
 )
@@ -138,8 +153,10 @@ def run_distributed_communication():
 
 
 @app.local_entrypoint()
-def main(test_filter: str = "", distributed: bool = False):
-    if distributed:
+def main(test_filter: str = "", distributed: bool = False, ddp: bool = False):
+    if ddp:
+        run_ddp_benchmark.remote()
+    elif distributed:
         run_distributed_communication.remote()
     elif test_filter:
         run_flashattention_tests.remote(test_filter)
