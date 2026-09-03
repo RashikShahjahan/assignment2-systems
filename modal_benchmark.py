@@ -123,9 +123,25 @@ def run_flashattention_tests(test_filter: str = "test_flash_forward_pass_triton"
         check=True,
     )
 
+
+@app.function(
+    image=image,
+    gpu="T4:8",
+    timeout=20 * 60,
+)
+def run_distributed_communication():
+    subprocess.run(
+        ["uv", "run", "python", "distributed_communication_single_node.py"],
+        cwd="/root/assignment2",
+        check=True,
+    )
+
+
 @app.local_entrypoint()
-def main(test_filter: str = ""):
-    if test_filter:
+def main(test_filter: str = "", distributed: bool = False):
+    if distributed:
+        run_distributed_communication.remote()
+    elif test_filter:
         run_flashattention_tests.remote(test_filter)
     else:
         smoke_test.remote()

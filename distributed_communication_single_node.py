@@ -25,7 +25,6 @@ def setup(rank, world_size):
         "nccl",
         rank=rank,
         world_size=world_size,
-        device=rank
     )
 
 
@@ -36,6 +35,8 @@ def benchmark(rank, world_size, shared_results):
         data = torch.rand(
             num_elements,
             dtype=torch.float32,
+             device=rank
+
         )
 
         # Warmup
