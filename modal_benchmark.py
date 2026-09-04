@@ -126,7 +126,7 @@ def run_flashattention_tests(test_filter: str = "test_flash_forward_pass_triton"
 
 @app.function(
     image=image,
-    gpu="A100-80GB:2",
+    gpu="H200:2",
     cpu=8,
     memory=65536,
     timeout=20 * 60,

@@ -14,8 +14,20 @@ class DDP(torch.nn.Module):
         return self.module(*args,**kwargs)
 
     def finish_gradient_synchronization(self):
-        for param in self.module.parameters():
+        grads = []
+        params = list(self.module.parameters())
+        for param in params:
             if param.grad is not None:
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+                grads.append(param.grad)
+                
 
+        flattened_grads = torch._utils._flatten_dense_tensors(grads)
+        dist.all_reduce(flattened_grads, op=dist.ReduceOp.AVG)
 
+        synced_grads = torch._utils._unflatten_dense_tensors(
+            flattened_grads,
+            grads,
+        )
+
+        for param, synced_grad in zip(params, synced_grads):
+            param.grad.copy_(synced_grad)
