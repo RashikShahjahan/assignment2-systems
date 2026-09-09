@@ -141,6 +141,21 @@ def run_ddp_benchmark():
 
 @app.function(
     image=image,
+    gpu="H200:2",
+    cpu=8,
+    memory=65536,
+    timeout=20 * 60,
+)
+def run_ddp_memory():
+    subprocess.run(
+        ["uv", "run", "python", "-m", "cs336_systems.ddp_memory"],
+        cwd="/root/assignment2",
+        check=True,
+    )
+
+
+@app.function(
+    image=image,
     gpu="T4:8",
     timeout=20 * 60,
 )
@@ -153,8 +168,15 @@ def run_distributed_communication():
 
 
 @app.local_entrypoint()
-def main(test_filter: str = "", distributed: bool = False, ddp: bool = False):
-    if ddp:
+def main(
+    test_filter: str = "",
+    distributed: bool = False,
+    ddp: bool = False,
+    ddp_memory: bool = False,
+):
+    if ddp_memory:
+        run_ddp_memory.remote()
+    elif ddp:
         run_ddp_benchmark.remote()
     elif distributed:
         run_distributed_communication.remote()
