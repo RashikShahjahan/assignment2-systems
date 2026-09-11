@@ -1,6 +1,9 @@
 from __future__ import annotations
 #from cs336_systems.flash_attention import FlashAttention, FlashAttentionTriton
 from cs336_systems.ddp import DDP
+from cs336_systems.fsdp import FSDP
+import torch.distributed as dist
+
 from cs336_systems.optimizer_state_sharding import OptimizerStateSharding
 
 import torch
@@ -89,7 +92,7 @@ def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) 
         Instance of an FSDP class.
     """
     # For example: return FSDP(module, compute_dtype=compute_dtype)
-    raise NotImplementedError
+    return FSDP(module, compute_dtype=compute_dtype)
 
 
 def fsdp_on_after_backward(fsdp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
@@ -104,7 +107,7 @@ def fsdp_on_after_backward(fsdp_model: torch.nn.Module, optimizer: torch.optim.O
             Optimizer being used with the FSDP-wrapped model.
     """
     # For example: fsdp_model.finish_gradient_synchronization()
-    raise NotImplementedError
+    fsdp_model.finish_gradient_synchronization()
 
 
 def fsdp_gather_full_params(fsdp_model: torch.nn.Module) -> dict[str, torch.Tensor]:
@@ -118,7 +121,47 @@ def fsdp_gather_full_params(fsdp_model: torch.nn.Module) -> dict[str, torch.Tens
     Returns:
         State dictionary mapping parameter names to full (unsharded) tensors.
     """
-    raise NotImplementedError
+    full_params = {}
+
+    # Replicated parameters, e.g. RMSNorm weights.
+    # These still live normally inside fsdp_model.module.
+    for name, param in fsdp_model.module.named_parameters():
+        full_params[name] = param.detach()
+
+    # Reconstruct sharded Linear / Embedding parameters.
+    for metadata in fsdp_model.shard_metadata:
+        local_shard = fsdp_model.local_shards[
+            metadata["local_shard_index"]
+        ]
+
+        # Gather MASTER shards directly -- do not cast to compute_dtype.
+        gathered_shards = [
+            torch.empty_like(local_shard)
+            for _ in range(fsdp_model.world_size)
+        ]
+
+        dist.all_gather(
+            gathered_shards,
+            local_shard.detach().contiguous(),
+        )
+
+        full_flat = torch.cat(gathered_shards)
+        full_flat = full_flat[:metadata["original_numel"]]
+
+        full_weight = full_flat.reshape(
+            metadata["original_shape"]
+        )
+
+        # A shared parameter can have multiple consumers.
+        for module_name, _ in metadata["consumers"]:
+            name = (
+                f"{module_name}.weight"
+                if module_name
+                else "weight"
+            )
+            full_params[name] = full_weight
+
+    return full_params
 
 
 def get_sharded_optimizer(params, optimizer_cls: type[torch.optim.Optimizer], **kwargs) -> torch.optim.Optimizer:
